@@ -5,6 +5,7 @@ Excel多表合并工具
 - tkinter GUI，中文界面
 """
 
+import copy
 import os
 import sys
 import platform
@@ -14,6 +15,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
 from datetime import datetime
+
+import openpyxl as opxl
 
 import pandas as pd
 from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
@@ -259,7 +262,11 @@ class ExcelMergerApp:
             add_source = self.add_source_col.get()
 
             all_frames: list[pd.DataFrame] = []  # 用于 single 模式
+            all_style_tracker: list[tuple] = []   # (row_offset, col_offset, styles)
+            single_row_offset = 0
+
             file_frames: dict[str, pd.DataFrame] = {}  # 用于 separate 模式
+            file_styles: dict[str, tuple] = {}          # sheet_name -> (col_offset, styles)
             skipped: list[str] = []
 
             for idx, fpath in enumerate(files, 1):
@@ -280,13 +287,18 @@ class ExcelMergerApp:
                     self._update_progress(idx, total)
                     continue
 
-                for sheet_name, df in dfs:
+                for sheet_name, df, styles in dfs:
+                    col_offset = 0
                     if add_source:
                         df.insert(0, "来源文件名", fname)
+                        col_offset = 1
                         if sheet_scope == "all" and len(dfs) > 1:
                             df.insert(1, "来源Sheet", sheet_name)
+                            col_offset = 2
 
                     if merge_mode == "single":
+                        all_style_tracker.append((single_row_offset, col_offset, styles))
+                        single_row_offset += len(df)
                         all_frames.append(df)
                     else:
                         # separate: 用 文件名 或 文件名_Sheet名 作为sheet名
@@ -302,6 +314,7 @@ class ExcelMergerApp:
                             key = orig_key[: 31 - len(suffix)] + suffix
                             counter += 1
                         file_frames[key] = df
+                        file_styles[key] = (col_offset, styles)
 
                 self.root.after(0, lambda f=fname: self._log(f"[完成] {f}"))
                 self._update_progress(idx, total)
@@ -326,12 +339,13 @@ class ExcelMergerApp:
                 merged = pd.concat(all_frames, ignore_index=True)
                 with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
                     merged.to_excel(writer, sheet_name="合并结果", index=False)
-                    self._format_sheet(writer.sheets["合并结果"])
+                    self._format_sheet(writer.sheets["合并结果"], all_style_tracker)
             else:
                 with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
                     for sname, df in file_frames.items():
                         df.to_excel(writer, sheet_name=sname, index=False)
-                        self._format_sheet(writer.sheets[sname])
+                        col_offset, styles = file_styles.get(sname, (0, {}))
+                        self._format_sheet(writer.sheets[sname], [(0, col_offset, styles)])
 
             # 3. 完成
             summary = f"合并完成！输出文件：{out_name}"
@@ -365,21 +379,83 @@ class ExcelMergerApp:
         return result
 
     # ── 读取单个 Excel ──
-    def _read_excel(self, fpath: str, scope: str) -> list[tuple[str, pd.DataFrame]]:
+    def _read_excel(self, fpath: str, scope: str) -> list[tuple[str, pd.DataFrame, dict]]:
         results = []
-        if scope == "first":
-            df = pd.read_excel(fpath, sheet_name=0, engine=self._engine(fpath))
-            if not df.empty:
-                xl = pd.ExcelFile(fpath, engine=self._engine(fpath))
-                sheet_name = xl.sheet_names[0]
-                xl.close()
-                results.append((sheet_name, df))
-        else:
-            sheets = pd.read_excel(fpath, sheet_name=None, engine=self._engine(fpath))
-            for name, df in sheets.items():
+        is_xls = fpath.lower().endswith(".xls")
+
+        if is_xls:
+            # .xls 不支持 openpyxl，跳过样式提取
+            if scope == "first":
+                df = pd.read_excel(fpath, sheet_name=0, engine="xlrd")
                 if not df.empty:
-                    results.append((name, df))
+                    xl = pd.ExcelFile(fpath, engine="xlrd")
+                    sheet_name = xl.sheet_names[0]
+                    xl.close()
+                    results.append((sheet_name, df, {}))
+            else:
+                sheets = pd.read_excel(fpath, sheet_name=None, engine="xlrd")
+                for name, df in sheets.items():
+                    if not df.empty:
+                        results.append((name, df, {}))
+            return results
+
+        # .xlsx：用 openpyxl 提取样式，再用 pandas 读数据
+        try:
+            wb = opxl.load_workbook(fpath, data_only=True)
+            sheet_names = [wb.sheetnames[0]] if scope == "first" else list(wb.sheetnames)
+            for sname in sheet_names:
+                ws = wb[sname]
+                styles = self._extract_styles(ws)
+                df = pd.read_excel(fpath, sheet_name=sname, engine="openpyxl")
+                if not df.empty:
+                    results.append((sname, df, styles))
+            wb.close()
+        except Exception:
+            # 降级：不保留样式
+            if scope == "first":
+                df = pd.read_excel(fpath, sheet_name=0, engine="openpyxl")
+                if not df.empty:
+                    xl = pd.ExcelFile(fpath, engine="openpyxl")
+                    sheet_name = xl.sheet_names[0]
+                    xl.close()
+                    results.append((sheet_name, df, {}))
+            else:
+                sheets = pd.read_excel(fpath, sheet_name=None, engine="openpyxl")
+                for name, df in sheets.items():
+                    if not df.empty:
+                        results.append((name, df, {}))
         return results
+
+    @staticmethod
+    def _extract_styles(ws) -> dict:
+        """提取数据行（跳过表头第1行）中有颜色的单元格样式。
+        返回 {(data_row_0based, col_0based): {'fill': ..., 'font_color': ...}}
+        """
+        styles = {}
+        for r_idx, row in enumerate(ws.iter_rows(min_row=2)):  # 跳过表头
+            for c_idx, cell in enumerate(row):
+                entry = {}
+                try:
+                    fill = cell.fill
+                    if fill and fill.fill_type and fill.fill_type not in ("none", None):
+                        entry["fill"] = copy.copy(fill)
+                except Exception:
+                    pass
+                try:
+                    font = cell.font
+                    if font and font.color:
+                        ctype = font.color.type
+                        if ctype == "rgb":
+                            # 跳过默认黑色
+                            if font.color.rgb not in ("FF000000", "00000000"):
+                                entry["font_color"] = copy.copy(font.color)
+                        elif ctype in ("indexed", "theme"):
+                            entry["font_color"] = copy.copy(font.color)
+                except Exception:
+                    pass
+                if entry:
+                    styles[(r_idx, c_idx)] = entry
+        return styles
 
     @staticmethod
     def _engine(fpath: str) -> str:
@@ -387,8 +463,8 @@ class ExcelMergerApp:
 
     # ── 格式化 Sheet ──
     @staticmethod
-    def _format_sheet(ws):
-        """给 sheet 添加表头样式、边框、自动列宽、冻结首行."""
+    def _format_sheet(ws, style_tracker=None):
+        """给 sheet 添加表头样式、边框、自动列宽、冻结首行，并恢复原始单元格颜色."""
         thin_border = Border(
             left=Side(style="thin"),
             right=Side(style="thin"),
@@ -412,6 +488,25 @@ class ExcelMergerApp:
                 else:
                     cell.font = cell_font
                     cell.alignment = cell_align
+
+        # 恢复原始单元格颜色（叠加在基础格式之上）
+        if style_tracker:
+            for row_offset, col_offset, styles in style_tracker:
+                for (data_row, orig_col), entry in styles.items():
+                    ws_row = data_row + row_offset + 2  # +1 表头行, +1 因为1-based
+                    ws_col = orig_col + col_offset + 1   # +1 因为1-based
+                    if ws_row < 2 or ws_row > ws.max_row or ws_col < 1 or ws_col > ws.max_column:
+                        continue
+                    cell = ws.cell(row=ws_row, column=ws_col)
+                    if "fill" in entry:
+                        cell.fill = entry["fill"]
+                    if "font_color" in entry:
+                        f = cell.font
+                        cell.font = Font(
+                            name=f.name, size=f.size, bold=f.bold,
+                            italic=f.italic, underline=f.underline,
+                            strike=f.strike, color=entry["font_color"],
+                        )
 
         # 自动列宽
         for col_idx in range(1, ws.max_column + 1):
