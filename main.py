@@ -16,6 +16,8 @@ from pathlib import Path
 from datetime import datetime
 
 import pandas as pd
+from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
+from openpyxl.utils import get_column_letter
 
 
 # ── 颜色 / 字体常量 ──────────────────────────────────────────────
@@ -322,11 +324,14 @@ class ExcelMergerApp:
 
             if merge_mode == "single":
                 merged = pd.concat(all_frames, ignore_index=True)
-                merged.to_excel(out_path, index=False, engine="openpyxl")
+                with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
+                    merged.to_excel(writer, sheet_name="合并结果", index=False)
+                    self._format_sheet(writer.sheets["合并结果"])
             else:
                 with pd.ExcelWriter(out_path, engine="openpyxl") as writer:
-                    for sheet_name, df in file_frames.items():
-                        df.to_excel(writer, sheet_name=sheet_name, index=False)
+                    for sname, df in file_frames.items():
+                        df.to_excel(writer, sheet_name=sname, index=False)
+                        self._format_sheet(writer.sheets[sname])
 
             # 3. 完成
             summary = f"合并完成！输出文件：{out_name}"
@@ -379,6 +384,56 @@ class ExcelMergerApp:
     @staticmethod
     def _engine(fpath: str) -> str:
         return "xlrd" if fpath.lower().endswith(".xls") else "openpyxl"
+
+    # ── 格式化 Sheet ──
+    @staticmethod
+    def _format_sheet(ws):
+        """给 sheet 添加表头样式、边框、自动列宽、冻结首行."""
+        thin_border = Border(
+            left=Side(style="thin"),
+            right=Side(style="thin"),
+            top=Side(style="thin"),
+            bottom=Side(style="thin"),
+        )
+        header_font = Font(name="Microsoft YaHei UI", size=11, bold=True)
+        header_fill = PatternFill(start_color="4A90D9", end_color="4A90D9", fill_type="solid")
+        header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell_font = Font(name="Microsoft YaHei UI", size=10)
+        cell_align = Alignment(vertical="center", wrap_text=False)
+
+        # 遍历所有单元格
+        for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=ws.max_row, max_col=ws.max_column), 1):
+            for cell in row:
+                cell.border = thin_border
+                if row_idx == 1:
+                    cell.font = Font(name="Microsoft YaHei UI", size=11, bold=True, color="FFFFFF")
+                    cell.fill = header_fill
+                    cell.alignment = header_align
+                else:
+                    cell.font = cell_font
+                    cell.alignment = cell_align
+
+        # 自动列宽
+        for col_idx in range(1, ws.max_column + 1):
+            max_len = 0
+            col_letter = get_column_letter(col_idx)
+            for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 200), min_col=col_idx, max_col=col_idx):
+                cell = row[0]
+                if cell.value is not None:
+                    # 中文字符按2个宽度算
+                    val = str(cell.value)
+                    length = sum(2 if ord(c) > 127 else 1 for c in val)
+                    max_len = max(max_len, length)
+            # 限制在 8~50 之间
+            ws.column_dimensions[col_letter].width = min(max(max_len + 3, 8), 50)
+
+        # 冻结首行（滚动时表头不动）
+        ws.freeze_panes = "A2"
+
+        # 行高
+        ws.row_dimensions[1].height = 28
+        for r in range(2, ws.max_row + 1):
+            ws.row_dimensions[r].height = 22
 
     # ── 进度条更新 ──
     def _update_progress(self, current: int, total: int):
