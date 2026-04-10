@@ -36,8 +36,8 @@ class ExcelMergerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Excel多表合并工具")
-        self.root.geometry("620x580")
-        self.root.resizable(False, False)
+        self.root.geometry("620x700")
+        self.root.resizable(False, True)
         self.root.configure(bg=BG)
 
         # ── 变量 ──
@@ -183,20 +183,23 @@ class ExcelMergerApp:
         card4.pack(fill="x", padx=24, pady=(0, 8))
 
         self.log_text = tk.Text(
-            card4, height=6, font=("Consolas", 9), bg="#FAFAFA",
+            card4, height=5, font=("Consolas", 9), bg="#FAFAFA",
             fg=TEXT, relief="flat", wrap="word", state="disabled",
         )
-        self.log_text.pack(fill="x", padx=10, pady=8)
+        self.log_text.pack(fill="x", padx=10, pady=6)
 
-        # ── 执行按钮 ──
+        # ── 执行按钮（醒目大按钮） ──
+        btn_frame = tk.Frame(self.root, bg=BG)
+        btn_frame.pack(fill="x", padx=24, pady=(8, 16))
+
         btn_run = tk.Button(
-            self.root, text="开 始 合 并", font=FONT_B,
+            btn_frame, text="开 始 合 并", font=("Microsoft YaHei UI", 13, "bold"),
             bg=PRIMARY, fg="white", activebackground="#3A7BC8",
             activeforeground="white", relief="flat",
-            padx=40, pady=8, cursor="hand2",
+            padx=60, pady=10, cursor="hand2",
             command=self._start_merge,
         )
-        btn_run.pack(pady=(4, 16))
+        btn_run.pack(expand=True)
 
     # ── 辅助 UI ──────────────────────────────────────────────────
     @staticmethod
@@ -395,8 +398,7 @@ class ExcelMergerApp:
 
 
 def main():
-    root = tk.Tk()
-    # macOS / Windows DPI 适配
+    # Windows DPI 适配（必须在创建 Tk 之前）
     try:
         if platform.system() == "Windows":
             from ctypes import windll
@@ -404,6 +406,7 @@ def main():
     except Exception:
         pass
 
+    root = tk.Tk()
     ExcelMergerApp(root)
     root.mainloop()
 
